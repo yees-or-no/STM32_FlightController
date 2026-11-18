@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "mpu6050.h"
 #include "mavlink_out.h"
+#include "bmp280.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,6 +37,9 @@
 #define MPU6050_LOOP_MS   5U    /* periode baca sensor: 5 ms = 200 Hz */
 #define I2C_MAX_FAIL      10U   /* gagal baca berturut-turut sebelum I2C di-reset */
 #define REINIT_PERIOD_MS  500U  /* jeda antar percobaan Init kalau sensor tidak terdeteksi */
+#define BARO_LOOP_MS      50U   /* periode baca barometer: 50 ms = 20 Hz */
+#define BARO_MAX_FAIL     20U   /* gagal baca berturut-turut sebelum BMP280 di-init ulang */
+#define BARO_CAL_SAMPLES  20U   /* jumlah sampel rata-rata untuk tekanan permukaan (P0) */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -53,6 +57,12 @@ uint32_t          i2c_error_count = 0;   /* total error sejak boot */
 static uint8_t    i2c_fail_streak = 0;   /* error berturut-turut */
 static uint32_t   t_loop  = 0;
 static uint32_t   t_retry = 0;
+
+BMP280_t          BMP;
+HAL_StatusTypeDef BMP_status = HAL_ERROR;
+static uint8_t    baro_fail_streak = 0;
+static uint32_t   t_baro  = 0;
+static uint32_t   t_baro_retry = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -98,14 +108,28 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_I2C1_Init();
-  MX_USB_DEVICE_Init();
+
+  /* --- DISABLED FOR ST-LINK ONLY TESTING --- */
+  // MX_USB_DEVICE_Init();
+
   /* USER CODE BEGIN 2 */
   /* Sensor harus DIAM dan datar sekitar 0,2 detik saat Init, karena sudut awal
    * filter diambil dari accelerometer. */
   MPU6050_status = MPU6050_Init(&hi2c1, &MPU6050);
+
+  /* Barometer: init, lalu rata-rata beberapa sampel sebagai tekanan permukaan (P0).
+   * Ketinggian BMP.altitude_f dihitung relatif terhadap P0 ini. Sekitar 0,6 detik. */
+  BMP_status = BMP280_Init(&hi2c1, &BMP);
+  if (BMP_status == HAL_OK)
+  {
+    BMP_status = BMP280_CalibrateGround(&hi2c1, &BMP, BARO_CAL_SAMPLES);
+  }
+
   MavOut_Init();
-  t_loop  = HAL_GetTick();
-  t_retry = HAL_GetTick();
+  t_loop       = HAL_GetTick();
+  t_retry      = HAL_GetTick();
+  t_baro       = HAL_GetTick();
+  t_baro_retry = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -118,8 +142,46 @@ int main(void)
     /* USER CODE BEGIN 3 */
     uint32_t now = HAL_GetTick();
 
-    /* ---- Sensor belum terdeteksi: coba Init ulang secara berkala ----
-     * Tidak ada pesan teks lewat USB: aliran USB hanya boleh berisi MAVLink. */
+    /* --- INDICATOR LED (PC13) ---
+     * Berkedip cepat jika MPU6050 OK, berkedip lambat jika MPU6050 gagal.
+     * Agar kita tahu board tidak hang saat ST-Link dicabut/pasang. */
+    static uint32_t t_led = 0;
+    if (MPU6050_status == HAL_OK) {
+        if ((now - t_led) > 100) { t_led = now; HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13); }
+    } else {
+        if ((now - t_led) > 500) { t_led = now; HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13); }
+    }
+
+    /* ---- Barometer (20 Hz) ---- */
+    if ((now - t_baro) >= BARO_LOOP_MS)
+    {
+      t_baro = now;
+
+      if (BMP_status == HAL_OK)
+      {
+        HAL_StatusTypeDef r = BMP280_Read(&hi2c1, &BMP);
+        if (r == HAL_OK || r == HAL_BUSY)   /* HAL_BUSY = sampel belum siap, bukan error */
+        {
+          baro_fail_streak = 0;
+        }
+        else if (++baro_fail_streak >= BARO_MAX_FAIL)
+        {
+          baro_fail_streak = 0;
+          BMP_status = HAL_ERROR;           /* paksa init ulang di bawah */
+        }
+      }
+      else if ((now - t_baro_retry) >= REINIT_PERIOD_MS)
+      {
+        t_baro_retry = now;
+        BMP_status = BMP280_Init(&hi2c1, &BMP);
+        if (BMP_status == HAL_OK)
+        {
+          BMP_status = BMP280_CalibrateGround(&hi2c1, &BMP, BARO_CAL_SAMPLES);
+        }
+      }
+    }
+
+    /* ---- Sensor belum terdeteksi: coba Init ulang secara berkala ---- */
     if (MPU6050_status != HAL_OK)
     {
       if ((now - t_retry) >= REINIT_PERIOD_MS)
@@ -157,7 +219,8 @@ int main(void)
     }
 
     /* ---- Kirim MAVLink lewat USB CDC (tidak blocking) ---- */
-    MavOut_Service(&MPU6050);
+    /* --- DISABLED UNTUK ST-LINK ONLY TESTING --- */
+    // MavOut_Service(&MPU6050, &BMP);
   }
   /* USER CODE END 3 */
 }
@@ -248,18 +311,28 @@ static void MX_I2C1_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+/* USER CODE BEGIN MX_GPIO_Init_1 */
+/* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
 
-  /* USER CODE END MX_GPIO_Init_2 */
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+/* USER CODE BEGIN MX_GPIO_Init_2 */
+/* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */

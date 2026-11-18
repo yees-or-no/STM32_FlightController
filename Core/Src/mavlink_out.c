@@ -23,6 +23,7 @@
 #define STREAM_PERIOD    20U      /* 50 Hz */
 #define HEARTBEAT_PERIOD 1000U
 #define DEG2RAD          0.01745329252f
+#define BARO_TX_PERIOD   100U     /* 10 Hz */
 
 extern USBD_HandleTypeDef hUsbDeviceFS;
 
@@ -31,6 +32,15 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 static uint8_t  s_tx[512];
 static uint16_t s_len;
 static uint32_t t_stream, t_hb;
+static uint32_t t_baro_tx;
+
+/* Clamp float ke rentang int16 supaya tidak overflow saat cast. */
+static int16_t clamp_i16(float v)
+{
+    if (v >  32767.0f) return  32767;
+    if (v < -32768.0f) return -32768;
+    return (int16_t)v;
+}
 
 /* true kalau USB sudah terkonfigurasi dan transmit sebelumnya sudah selesai */
 static uint8_t usb_ready(void)
@@ -62,12 +72,13 @@ static void flush(void)
 void MavOut_Init(void)
 {
     s_len = 0;
-    t_stream = t_hb = HAL_GetTick();
+    t_stream = t_hb = t_baro_tx = HAL_GetTick();
 }
 
-void MavOut_Service(const MPU6050_t *d)
+void MavOut_Service(const MPU6050_t *d, const BMP280_t *baro)
 {
     if (!usb_ready()) return;   /* USB sibuk: coba lagi putaran berikutnya, tanpa menunggu */
+    if (d == NULL) return;      /* tidak ada data IMU: jangan dereference NULL */
 
     uint32_t now = HAL_GetTick();
     mavlink_message_t msg;
@@ -99,13 +110,31 @@ void MavOut_Service(const MPU6050_t *d)
 
         /* Data sensor: mG dan mrad/s */
         mavlink_msg_scaled_imu_pack(SYS_ID, COMP_ID, &msg, now,
-                                    (int16_t)(d->Ax * 1000.0f),
-                                    (int16_t)(d->Ay * 1000.0f),
-                                    (int16_t)(d->Az * 1000.0f),
-                                    (int16_t)(d->Gx * DEG2RAD * 1000.0f),
-                                    (int16_t)(d->Gy * DEG2RAD * 1000.0f),
-                                    (int16_t)(d->Gz * DEG2RAD * 1000.0f),
+                                    clamp_i16(d->Ax * 1000.0f),
+                                    clamp_i16(d->Ay * 1000.0f),
+                                    clamp_i16(d->Az * 1000.0f),
+                                    clamp_i16(d->Gx * DEG2RAD * 1000.0f),
+                                    clamp_i16(d->Gy * DEG2RAD * 1000.0f),
+                                    clamp_i16(d->Gz * DEG2RAD * 1000.0f),
                                     0, 0, 0, 0);
+        queue_msg(&msg);
+    }
+
+    /* Baro -> SCALED_PRESSURE + VFR_HUD (10 Hz).
+     * Dulu blok ini nyasar di file-scope; sekarang sudah di dalam fungsi. */
+    if (baro != NULL && baro->alt_valid && (now - t_baro_tx) >= BARO_TX_PERIOD) {
+        t_baro_tx = now;
+
+        /* tekanan (hPa) dan suhu (centi-derajat C) */
+        mavlink_msg_scaled_pressure_pack(SYS_ID, COMP_ID, &msg, now,
+                                         baro->pressure_Pa / 100.0f, 0.0f,
+                                         (int16_t)(baro->temperature_C * 100.0f), 0);
+        queue_msg(&msg);
+
+        /* ketinggian relatif (m) lewat VFR_HUD, terbaca di QGroundControl */
+        mavlink_msg_vfr_hud_pack(SYS_ID, COMP_ID, &msg,
+                                 0.0f, 0.0f, 0, 0,
+                                 baro->altitude_f, 0.0f);
         queue_msg(&msg);
     }
 
@@ -115,6 +144,5 @@ void MavOut_Service(const MPU6050_t *d)
 #else  /* bukan mode MAVLink: fungsi kosong supaya main.c tetap bisa dilink */
 
 void MavOut_Init(void) {}
-void MavOut_Service(const MPU6050_t *d) { (void)d; }
-
+void MavOut_Service(const MPU6050_t *d, const BMP280_t *baro) { (void)d; (void)baro; }
 #endif /* MAVOUT_ENABLE */

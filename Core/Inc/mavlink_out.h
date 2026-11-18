@@ -10,10 +10,12 @@
  * (PuTTY ATAU Python). Di mode OUT_MAVLINK, PuTTY hanya menampilkan karakter acak.
  *
  * Pesan MAVLink yang dikirim:
- *   HEARTBEAT   1 Hz
- *   ATTITUDE    50 Hz  -> sudut Kalman (roll, pitch; yaw = 0 karena tanpa magnetometer)
- *   DEBUG_VECT  50 Hz  -> name "COMP", x = roll, y = pitch complementary (derajat)
- *   SCALED_IMU  50 Hz  -> accel (mG) dan gyro (mrad/s)
+ *   HEARTBEAT        1 Hz
+ *   ATTITUDE         50 Hz  -> sudut Kalman (roll, pitch; yaw = 0 karena tanpa magnetometer)
+ *   DEBUG_VECT       50 Hz  -> name "COMP", x = roll, y = pitch complementary (derajat)
+ *   SCALED_IMU       50 Hz  -> accel (mG) dan gyro (mrad/s)
+ *   SCALED_PRESSURE  10 Hz  -> tekanan (hPa) + suhu (cdegC)
+ *   VFR_HUD          10 Hz  -> ketinggian relatif (m)
  *
  * Letakkan di Core/Inc.
  */
@@ -22,6 +24,7 @@
 
 #include "main.h"
 #include "mpu6050.h"
+#include "bmp280.h"      /* <-- WAJIB: supaya BMP280_t dikenal */
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,10 +41,13 @@ extern "C" {
 void MavOut_Init(void);
 
 /* Panggil di setiap putaran while(1). Fungsi ini mengatur laju kirimnya sendiri
- * dan tidak pernah blocking: kalau USB masih sibuk, langsung kembali. */
-void MavOut_Service(const MPU6050_t *imu);
+ * dan tidak pernah blocking: kalau USB masih sibuk, langsung kembali.
+ *
+ * d    : data IMU (wajib, tidak boleh NULL)
+ * baro : data barometer (boleh NULL kalau BMP280 tidak terpasang) */
+void MavOut_Service(const MPU6050_t *d, const BMP280_t *baro);
 
 #ifdef __cplusplus
 }
 #endif
-#endif
+#endif /* MAVLINK_OUT_H */
